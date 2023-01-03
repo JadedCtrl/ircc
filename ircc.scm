@@ -38,23 +38,15 @@
 	conn))
 
 
-;; Join the given channel. Not much to say, really.
-(define (irc:join conn channel #!optional key)
-  (let* ([params-sans-key (list conn "JOIN" channel)]
-		 [params (if key (append params-sans-key `(,key))
-					 params-sans-key)])
-		(apply irc:write-cmd params)))
-
-
 ;; Read-in the next reply or command from the server, into a parsable alist with
 ;; four keys:
 (define (irc:read-alist conn)
   (irc:process-alist-internally
    conn
-   (irc:line->alist
-	(read-line (hash-table-ref conn 'out)))))
+   (irc:line->alist (irc:read-line conn))))
 
 
+;; Read a single line from the IRC server
 (define (irc:read-line conn)
   (read-line (hash-table-ref conn 'out)))
 
@@ -68,6 +60,14 @@
 ;; Write a line to the IRC server connection.
 (define (irc:write-line text connection)
   (write-line text (hash-table-ref connection 'in)))
+
+
+;; Join the given channel. Not much to say, really.
+(define (irc:join conn channel #!optional key)
+  (let* ([params-sans-key (list conn "JOIN" channel)]
+		 [params (if key (append params-sans-key `(,key))
+					 params-sans-key)])
+		(apply irc:write-cmd params)))
 
 
 ;; The user should have more-or-less total control over how to respond to
@@ -86,7 +86,7 @@
 
 ;; Handle some replies necssary for basic functionality
 (define (irc:process-reply-internally conn reply params #!optional sender)
-  (cond [(eq? reply 001)
+  (cond [(eq? reply RPL_WELCOME)
 		 (hash-table-set! conn 'registered #t)]))
 
 
@@ -115,7 +115,7 @@
 ;; and 'sender'.
 (define (irc:line->alist str)
   (let* ([colon-split (string-split str " :")]
-		 [last-column (reduce string-append #f (cdr colon-split))] ;; for additional colons post-colon
+		 [last-column (reduce string-append #f (cdr colon-split))] ;; for post-colon colons
 		 [other-columns (string-split (car colon-split) " ")]
 		 [sender (if (eq? #\:
 						 (car (string->list (car other-columns))))
@@ -132,9 +132,43 @@
 	  ,(append '(params) params)
 	  (sender ,sender))))
 
+
+;; Basic loop for using an IRC connection, using two hook functions:
+;;    (on-command connection command params sender)
+;;    (on-reply connection reply-code params sender)
+(define (irc:loop connection on-command on-reply)
+  (let* ([output (irc:read-alist connection)]
+		 [command (alist-ref 'command output)]
+		 [reply (alist-ref 'reply output)]
+		 [params (alist-ref 'params output)]
+		 [sender (alist-ref 'sender output)])
+	(if (and on-command (car command))
+		(apply on-command (append (list connection) command (list params) sender)))
+	(if (and on-reply (car reply))
+		(apply on-reply (append (list connection) reply (list params) sender)))
+	(irc:loop connection on-command on-reply)))
+
+
 ;; Just car's the value of alist-ref (if it exists)
 (define (alist-car-ref key alist)
   (let ([value (alist-ref key alist)])
 	(if value
 		(car value)
 		#f)))
+
+
+(define RPL_WELCOME 1)
+(define RPL_WHOISUSER 311)
+(define RPL_ENDOFWHO 315)
+(define RPL_ENDOFWHOIS 318)
+(define RPL_LIST 322)
+(define RPL_LISTEND 323)
+(define RPL_TOPIC 332)
+(define RPL_WHOREPLY 352)
+(define RPL_NAMREPLY 353)
+(define RPL_MOTD 372)
+(define RPL_MOTDSTART 375)
+(define RPL_ENDOFMOTD 376)
+(define ERR_NONICKNAMEGIVEN 431)
+(define ERR_ERRONEUSNICKNAME 432)
+(define ERR_NICKNAMEINUSE 433)
