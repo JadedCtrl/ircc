@@ -113,6 +113,16 @@
   (cond [(eq? reply RPL_WELCOME)
 		 (hash-table-set! conn 'registered #t)
 		 (hash-table-set! conn 'nick (car params))]
+		[(eq? reply RPL_TOPIC)
+		 (let ([channel (second params)]
+			   [topic (last params)])
+		   (irc:channel-set! conn channel 'topic topic))]
+		[(eq? reply RPL_TOPICWHOTIME)
+		 (let ([channel (second params)]
+			   [setter-nick (third params)]
+			   [time (time-unix->time-utc (string->number (last params)))])
+		   (irc:channel-set! conn channel 'topic-set
+							 (time->date time)))]
 		[(eq? reply RPL_NAMREPLY)
 		 (let ([channel (third params)]
 			   [chan-symbol (second params)]
@@ -225,23 +235,100 @@
 ;; Convert a string to a `msg` alist, with keys 'command', 'reply', 'params',
 ;; and 'sender'.
 (define (irc:line->alist str)
-  (let* ([colon-split (string-split str " :")]
-		 [last-column (reduce string-append #f (cdr colon-split))] ;; for post-colon colons
-		 [other-columns (string-split (car colon-split) " ")]
-		 [sender (if (eq? #\:
-						 (car (string->list (car other-columns))))
-					 (string-drop (car other-columns) 1)
-					 #f)]
-		 [command (if sender
-					  (cadr other-columns)
-					  (car other-columns))]
-		 [reply (string->number command)]
-		 [params (append (if sender (cddr other-columns) (cdr other-columns))
-						 (list last-column))])
+  (let* ([space-split (string-split str " ")]
+		 [tags (irc:line-tags str space-split)]
+		 [sender (irc:line-sender str space-split)]
+		 [verb (irc:line-verb str space-split)]
+		 [command (car verb)]
+		 [reply (string->number (car verb))]
+		 [params (irc:line-verb-params verb)])
 	`((command ,(if (not reply) command #f))
 	  (reply ,reply)
 	  ,(append '(params) params)
-	  (sender ,sender))))
+	  (sender ,sender)
+	  ,(append '(tags) tags))))
+
+
+;; Parses out all tags from the given line of IRC output
+(define (irc:line-tags str space-split)
+  (if (not (string=? (string-take str 1) "@"))
+	  #f
+	  (let*
+		  ([first-column (car space-split)]
+		   [tag-strs (string-split (string-drop first-column 1) ";")]
+		   [tag-pairs (map
+					   (lambda (tag-str)
+						 (string-split tag-str "="))
+					   tag-strs)]
+		   [no-empty-pairs (map
+							(lambda (tag-pair)
+							  (if (eq? (length tag-pair) 1)
+								  (append tag-pair '(""))
+								  tag-pair))
+							tag-pairs)]
+		   [escaped-pairs
+			(map
+			 (lambda (tag-pair)
+			   (list (car tag-pair)
+					 (string-translate* (cadr tag-pair)
+										'(("\\s" . " ")
+										  ("\\\\" . "\\")
+										  ("\\r" . "\r")
+										  ("\\n" . "\n")))))
+			 no-empty-pairs)])
+		escaped-pairs)))
+
+
+;; Parse the sender of an IRC output line, if there is any
+(define (irc:line-sender str space-split)
+  (let ([first-char (string-take str 1)])
+	(cond
+	 [(and (string=? first-char "@")
+		   (string=? (string-take (cadr space-split) 1) ":"))
+	  (string-drop (cadr space-split) 1)]
+	 [(string=? first-char ":")
+	  (string-drop (car space-split) 1)]
+	 [#t
+	  #f])))
+
+
+;; Parse out the verb (command or reply) with subsequent words into a list
+(define (irc:line-verb str space-split)
+  (let ([first-char (string-take str 1)])
+	(cond
+	 [(and (string=? first-char "@")
+		   (string=? (string-take (cadr space-split) 1) ":"))
+	  (cddr space-split)]
+	 [(or (string=? first-char "@")
+		  (string=? first-char ":"))
+	  (cdr space-split)]
+	 [#t
+	  space-split])))
+
+
+;; Returns a list of parameters from the parsed-out verb section of a line
+(define (irc:line-verb-params verb)
+  (let* ([params (cdr verb)]
+		[other-params '()]
+		[last-param '()])
+	(map (lambda (param)
+		   (cond
+			[(and (string=? (string-take param 1) ":")
+				  (null? last-param))
+			 (set! last-param
+			   (append last-param `(,(string-drop param 1))))]
+			[(not (null? last-param))
+			 (set! last-param (append last-param `(,param)))]
+			[#t
+			 (set! other-params (append other-params `(,param)))]))
+		 params)
+	(append
+	 other-params
+	 `(,(reduce-right
+		 (lambda (a b)
+		   (string-append a " " b))
+		 #f
+		 last-param)))))
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
@@ -254,6 +341,20 @@
 	(if value
 		(car value)
 		#f)))
+
+
+;; By Göran Weinholt, from the Scheme Cookbook
+;; https://cookbook.scheme.org/format-unix-timestamp/
+(define (time-unix->time-utc seconds)
+  (add-duration (date->time-utc (make-date 0 0 0 0 1 1 1970 0))
+                (make-time time-duration 0 seconds)))
+
+
+;; By Göran Weinholt, from the Scheme Cookbook
+;; https://cookbook.scheme.org/format-unix-timestamp/
+(define (time-unix->string seconds . maybe-format)
+  (apply date->string (time-utc->date (time-unix->time-utc seconds))
+         maybe-format))
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
