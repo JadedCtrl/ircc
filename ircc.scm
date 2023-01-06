@@ -18,7 +18,7 @@
 
 (import scheme
 		(chicken io) (chicken tcp)
-		srfi-1 srfi-69 srfi-130
+		srfi-1 srfi-19 srfi-69 srfi-130
 		openssl)
 
 
@@ -37,7 +37,10 @@
 	(hash-table-set! conn 'nick nick)
 	(hash-table-set! conn 'realname realname)
 	(hash-table-set! conn 'channels (make-hash-table))
+	(hash-table-set! conn 'users (make-hash-table))
+	(hash-table-set! conn 'capabilities '())
 
+	(irc:write-cmd conn "CAP" "REQ" "userhost-in-names")
 	(if password
 		(irc:write-cmd conn "PASS" password))
 	(irc:write-cmd conn "USER" username "*" "0"
@@ -87,6 +90,7 @@
 
 ;; Write a line to the IRC server connection.
 (define (irc:write-line text connection)
+  (print text)
   (write-line text (hash-table-ref connection 'in)))
 
 
@@ -130,7 +134,10 @@
 		   (irc:channel-set! conn channel 'symbol chan-symbol)
 		   (apply
 			(lambda (user)
-			  (irc:channel-user-add! conn channel user))
+			  (irc:channel-user-add! conn channel (irc:hostmask-nick user))
+			  (irc:user-add! conn (irc:hostmask-nick user))
+			  (if (irc:hostmask? user)
+				  (irc:user-set! conn (irc:hostmask-nick user) 'hostmask user)))
 			users))]))
 
 
@@ -138,25 +145,67 @@
 (define (irc:process-command-internally conn command params #!optional sender)
   (cond [(string=? command "PING")
 		 (irc:write-cmd conn "PONG" (last params))]
+		[(and (string=? command "CAP")
+			  (string=? (second params) "ACK"))
+		 (hash-table-set! conn 'capabilities (map string->symbol (cddr params)))
+		 (irc:write-cmd conn "CAP" "END")]
 		[(string=? command "JOIN")
  		 (let ([room-name (car params)]
-			   [new-user (car (string-split sender "!"))])
+			   [new-user sender])
 		   (if (irc:user-is-self? conn new-user)
 			   (irc:channel-add! conn room-name))
-		   (irc:channel-user-add! conn room-name new-user))]))
+		   (if (irc:hostmask? new-user)
+			   (irc:user-set! conn (irc:hostmask-nick new-user)
+							  'hostmask new-user))
+		   (irc:channel-user-add! conn room-name (irc:hostmask-nick new-user)))]))
+
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
 ;; Metadata accessors
 ;; ——————————————————————————————————————————————————————————————————————————————
 
-;; Return whether or not the given string (username/nick/whatever) is equivalent
-;; to current user.
-(define (irc:user-is-self? conn user-string)
-  (or (string=? (hash-table-ref conn 'username) user-string)
-	  (string=? (hash-table-ref conn 'nick)
-				(car (string-split user-string "!")))
-	  (string=? (hash-table-ref conn 'client) user-string)))
+;; Return whether or not the given capability has been agreed upon
+;; between the server and this connection
+(define (irc:capability? conn capability)
+  (member capability (hash-table-ref conn 'capabilities)))
+
+
+;; Add a user of the given nick to the internal list of users
+(define (irc:user-add! conn nick)
+  (let ([users-table (hash-table-ref conn 'users)])
+	(if (not (hash-table-exists? users-table nick))
+		(hash-table-set! users-table nick '()))))
+
+
+;; Remove a user from the internal list of users
+(define (irc:user-delete! conn nick)
+  (hash-table-delete! (hash-table-ref conn 'users) nick))
+
+
+;; Associate a piece of data with a user, by nick
+(define (irc:user-set! conn nick key value)
+  (let ([users-table (hash-table-ref conn 'users)])
+	(irc:user-add! conn nick)
+	(hash-table-set!
+	 users-table nick
+	 (alist-update key value
+				   (irc:user-alist conn nick)))))
+
+
+;; Return a pice of stored data relating to a user, by nick
+(define (irc:user-get conn nick key)
+  (irc:user-add! conn nick)
+  (alist-car-ref key (irc:user-alist conn nick)))
+
+
+;; Return an alist of data stored relating to the given user
+(define (irc:user-alist conn nick)
+  (let ([users-hash (hash-table-ref conn 'users)])
+	(irc:user-add! conn nick)
+	(if (hash-table-exists? users-hash nick)
+		(hash-table-ref users-hash nick)
+		#f)))
 
 
 ;; Add a channel of name `chan` to the internal list of channels
@@ -166,7 +215,7 @@
 
 
 ;; Remove a channel of name `chan` from the internal list of channels
-(define (irc:channel-remove! conn chan)
+(define (irc:channel-delete! conn chan)
   (hash-table-remove! (hash-table-ref conn 'channels) chan))
 
 
@@ -308,11 +357,13 @@
 
 ;; Returns a list of parameters from the parsed-out verb section of a line
 (define (irc:line-verb-params verb)
+  (print verb)
   (let* ([params (cdr verb)]
 		[other-params '()]
 		[last-param '()])
 	(map (lambda (param)
 		   (cond
+			[(string-null? param) #f]
 			[(and (string=? (string-take param 1) ":")
 				  (null? last-param))
 			 (set! last-param
@@ -329,6 +380,43 @@
 		   (string-append a " " b))
 		 #f
 		 last-param)))))
+
+
+;; —————————————————————————————————————————————————————————————————————————————
+;; Mucking around with hostmasks
+;; —————————————————————————————————————————————————————————————————————————————
+
+;; Return the nick part of a hostmask
+(define (irc:hostmask-nick hostmask)
+  (car (string-split hostmask "!")))
+
+
+;; The username/ident part of a hostmask
+(define (irc:hostmask-ident hostmask)
+  (car (string-split (cadr (string-split hostmask "!"))
+					 "@")))
+
+
+;; The host part of a hostmask
+(define (irc:hostmask-host hostmask)
+  (cadr (string-split hostmask "@")))
+
+
+;; Return whether or not a string is likely a valid hostmask
+(define (irc:hostmask? string)
+  (let ([at-! (string-contains string "!")]
+		[at-@ (string-contains string "@")]
+		[at-. (string-contains string ".")])
+	(and at-! at-@ at-.
+		 (string-cursor<? at-! at-@)
+		 (string-cursor<? at-@ at-.))))
+
+
+;; Return whether or not the given string (username/nick/hostmask/etc) is
+;; equivalent to current user.
+(define (irc:user-is-self? conn user-string)
+  (string=? (irc:hostmask-nick user-string)
+			(hash-table-ref conn 'nick)))
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
@@ -368,6 +456,7 @@
 (define RPL_LIST 322)
 (define RPL_LISTEND 323)
 (define RPL_TOPIC 332)
+(define RPL_TOPICWHOTIME 333)
 (define RPL_WHOREPLY 352)
 (define RPL_NAMREPLY 353)
 (define RPL_MOTD 372)
