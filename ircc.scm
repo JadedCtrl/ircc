@@ -137,8 +137,15 @@
 			  (irc:channel-user-add! conn channel (irc:hostmask-nick user))
 			  (irc:user-add! conn (irc:hostmask-nick user))
 			  (if (irc:hostmask? user)
-				  (irc:user-set! conn (irc:hostmask-nick user) 'hostmask user)))
-			users))]))
+				  (irc:user-set! conn (irc:hostmask-nick user) 'hostmask user)
+				  (irc:write-cmd conn "WHO" channel)))
+			users))]
+		[(eq? reply RPL_WHOREPLY)
+		 (let ([nick (sixth params)]
+			   [ident (third params)]
+			   [host (fourth params)])
+		   (irc:user-set! conn nick 'hostmask
+						  (string-append nick "!" ident "@" host)))]))
 
 
 ;; Handle some commands necessary for basic functionality
