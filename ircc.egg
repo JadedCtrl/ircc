@@ -1,0 +1,8 @@
+;; -*- Scheme -*-
+((synopsis "IRC client library.")
+ (author "Jaidyn Ann")
+ (category net)
+ (license "GPLv3")
+ (dependencies srfi-1 srfi-19 srfi-69 srfi-130 openssl)
+
+ (components (extension ircc)))

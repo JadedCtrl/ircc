@@ -15,83 +15,106 @@
 ;; along with this program. If not, see <https://www.gnu.org/licenses/>.
 ;;
 
+(module ircc
+	*
+;;	(irc:connect
+;;	 irc:loop
+;;	 irc:read-alist
+;;	 irc:write-cmd irc:write-line
+;;	 irc:user-set! irc:user-get
+;;	 irc:channels irc:channel-set! irc:channel-get
+;;	 irc:hostmask? irc:hostmask-nick irc:hostmask-ident irc:hostmask-host
+;;	 irc:user-is-self?)
 
 (import scheme
-		(chicken io) (chicken tcp)
+		(chicken base) (chicken io) (chicken module) (chicken string) (chicken tcp)
 		srfi-1 srfi-19 srfi-69 srfi-130
 		openssl)
 
 
-;; ——————————————————————————————————————————————————————————————————————————————
-;; Main
-;; ——————————————————————————————————————————————————————————————————————————————
+;; —————————————————————————————————————————————————————————————————————————————
+;; IRC constants
+;; —————————————————————————————————————————————————————————————————————————————
 
-;; Connect to the given IRC server, returning an IRC connection object.
-(define (irc:connect host port username nick #!optional (password #f) (realname #f))
-  (let ([conn (make-hash-table)])
-	(define-values (out in)
-	  (ssl-connect* hostname: host port: port))
-	(hash-table-set! conn 'in in)
-	(hash-table-set! conn 'out out)
-	(hash-table-set! conn 'username username)
-	(hash-table-set! conn 'nick nick)
-	(hash-table-set! conn 'realname realname)
-	(hash-table-set! conn 'channels (make-hash-table))
-	(hash-table-set! conn 'users (make-hash-table))
-	(hash-table-set! conn 'capabilities '())
-
-	(irc:write-cmd conn "CAP" "REQ" "userhost-in-names")
-	(if password
-		(irc:write-cmd conn "PASS" password))
-	(irc:write-cmd conn "USER" username "*" "0"
-				   (if realname realname "Jane Row"))
-	(irc:write-cmd conn "NICK" nick)
-	conn))
+(define RPL_WELCOME 1)                (export RPL_WELCOME)
+(define RPL_WHOISUSER 311)            (export RPL_WHOISUSER)
+(define RPL_ENDOFWHO 315)             (export RPL_ENDOFWHO)
+(define RPL_ENDOFWHOIS 318)           (export RPL_ENDOFWHOIS)
+(define RPL_LIST 322)                 (export RPL_LIST)
+(define RPL_LISTEND 323)              (export RPL_LISTEND)
+(define RPL_TOPIC 332)                (export RPL_TOPIC)
+(define RPL_TOPICWHOTIME 333)         (export RPL_TOPICWHOTIME)
+(define RPL_WHOREPLY 352)             (export RPL_WHOREPLY)
+(define RPL_NAMREPLY 353)             (export RPL_NAMREPLY)
+(define RPL_MOTD 372)                 (export RPL_MOTD)
+(define RPL_MOTDSTART 375)            (export RPL_MOTDSTART)
+(define RPL_ENDOFMOTD 376)            (export RPL_ENDOFMOTD)
+(define ERR_NONICKNAMEGIVEN 431)      (export ERR_NONICKNAMEGIVEN)
+(define ERR_ERRONEUSNICKNAME 432)     (export ERR_ERRONEUSNICKNAME)
+(define ERR_NICKNAMEINUSE 433)        (export ERR_NICKNAMEINUSE)
 
 
-;; Basic loop for using an IRC connection, using two hook functions:
-;;    (on-command connection command params sender)
-;;    (on-reply connection reply-code params sender)
-(define (irc:loop connection on-command on-reply)
-  (let* ([output (irc:read-alist connection)]
-		 [command (alist-ref 'command output)]
-		 [reply (alist-ref 'reply output)]
-		 [params (alist-ref 'params output)]
-		 [sender (alist-ref 'sender output)])
-	(if (and on-command (car command))
-		(apply on-command (append (list connection) command (list params) sender)))
-	(if (and on-reply (car reply))
-		(apply on-reply (append (list connection) reply (list params) sender)))
-	(irc:loop connection on-command on-reply)))
+;; —————————————————————————————————————————————————————————————————————————————
+;; Misc. helpers
+;; —————————————————————————————————————————————————————————————————————————————
+
+;; Just car's the value of alist-ref (if it exists)
+(define (alist-car-ref key alist)
+  (let ([value (alist-ref key alist)])
+	(if value
+		(car value)
+		#f)))
 
 
-;; ——————————————————————————————————————————————————————————————————————————————
-;; I/O
-;; ——————————————————————————————————————————————————————————————————————————————
-
-;; Read-in the next reply or command from the server, into a parsable alist with
-;; four keys:
-(define (irc:read-alist conn)
-  (irc:process-alist-internally
-   conn
-   (irc:line->alist (irc:read-line conn))))
+;; By Göran Weinholt, from the Scheme Cookbook
+;; https://cookbook.scheme.org/format-unix-timestamp/
+(define (time-unix->time-utc seconds)
+  (add-duration (date->time-utc (make-date 0 0 0 0 1 1 1970 0))
+                (make-time time-duration 0 seconds)))
 
 
-;; Read a single line from the IRC server
-(define (irc:read-line conn)
-  (read-line (hash-table-ref conn 'out)))
+;; By Göran Weinholt, from the Scheme Cookbook
+;; https://cookbook.scheme.org/format-unix-timestamp/
+(define (time-unix->string seconds . maybe-format)
+  (apply date->string (time-utc->date (time-unix->time-utc seconds))
+         maybe-format))
 
 
-;; Send a specific command to the server.
-(define (irc:write-cmd conn command . parameters)
-  (irc:write-line (apply irc:cmd->string (append `(,command) parameters))
-				  conn))
+;; —————————————————————————————————————————————————————————————————————————————
+;; Mucking around with hostmasks
+;; —————————————————————————————————————————————————————————————————————————————
+
+;; Return the nick part of a hostmask
+(define (irc:hostmask-nick hostmask)
+  (car (string-split hostmask "!")))
 
 
-;; Write a line to the IRC server connection.
-(define (irc:write-line text connection)
-  (print text)
-  (write-line text (hash-table-ref connection 'in)))
+;; The username/ident part of a hostmask
+(define (irc:hostmask-ident hostmask)
+  (car (string-split (cadr (string-split hostmask "!"))
+					 "@")))
+
+
+;; The host part of a hostmask
+(define (irc:hostmask-host hostmask)
+  (cadr (string-split hostmask "@")))
+
+
+;; Return whether or not a string is likely a valid hostmask
+(define (irc:hostmask? string)
+  (let ([at-! (string-contains string "!")]
+		[at-@ (string-contains string "@")]
+		[at-. (string-contains string ".")])
+	(and at-! at-@ at-.
+		 (string-cursor<? at-! at-@)
+		 (string-cursor<? at-@ at-.))))
+
+
+;; Return whether or not the given string (username/nick/hostmask/etc) is
+;; equivalent to current user.
+(define (irc:user-is-self? conn user-string)
+  (string=? (irc:hostmask-nick user-string)
+			(hash-table-ref conn 'nick)))
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
@@ -165,7 +188,6 @@
 			   (irc:user-set! conn (irc:hostmask-nick new-user)
 							  'hostmask new-user))
 		   (irc:channel-user-add! conn room-name (irc:hostmask-nick new-user)))]))
-
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
@@ -266,7 +288,7 @@
    conn chan 'users
    (filter (lambda (a-nick)
 			 (not (string=? nick a-nick)))
-		   (irc:channel-users conn name))))
+		   (irc:channel-users conn chan))))
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
@@ -364,7 +386,6 @@
 
 ;; Returns a list of parameters from the parsed-out verb section of a line
 (define (irc:line-verb-params verb)
-  (print verb)
   (let* ([params (cdr verb)]
 		[other-params '()]
 		[last-param '()])
@@ -389,86 +410,75 @@
 		 last-param)))))
 
 
-;; —————————————————————————————————————————————————————————————————————————————
-;; Mucking around with hostmasks
-;; —————————————————————————————————————————————————————————————————————————————
+;; ——————————————————————————————————————————————————————————————————————————————
+;; I/O
+;; ——————————————————————————————————————————————————————————————————————————————
 
-;; Return the nick part of a hostmask
-(define (irc:hostmask-nick hostmask)
-  (car (string-split hostmask "!")))
-
-
-;; The username/ident part of a hostmask
-(define (irc:hostmask-ident hostmask)
-  (car (string-split (cadr (string-split hostmask "!"))
-					 "@")))
+;; Read-in the next reply or command from the server, into a parsable alist with
+;; four keys:
+(define (irc:read-alist conn)
+  (irc:process-alist-internally
+   conn
+   (irc:line->alist (irc:read-line conn))))
 
 
-;; The host part of a hostmask
-(define (irc:hostmask-host hostmask)
-  (cadr (string-split hostmask "@")))
+;; Read a single line from the IRC server
+(define (irc:read-line conn)
+  (read-line (hash-table-ref conn 'out)))
 
 
-;; Return whether or not a string is likely a valid hostmask
-(define (irc:hostmask? string)
-  (let ([at-! (string-contains string "!")]
-		[at-@ (string-contains string "@")]
-		[at-. (string-contains string ".")])
-	(and at-! at-@ at-.
-		 (string-cursor<? at-! at-@)
-		 (string-cursor<? at-@ at-.))))
+;; Send a specific command to the server.
+(define (irc:write-cmd conn command . parameters)
+  (irc:write-line (apply irc:cmd->string (append `(,command) parameters))
+				  conn))
 
 
-;; Return whether or not the given string (username/nick/hostmask/etc) is
-;; equivalent to current user.
-(define (irc:user-is-self? conn user-string)
-  (string=? (irc:hostmask-nick user-string)
-			(hash-table-ref conn 'nick)))
+;; Write a line to the IRC server connection.
+(define (irc:write-line text connection)
+  (write-line text (hash-table-ref connection 'in)))
 
 
-;; —————————————————————————————————————————————————————————————————————————————
-;; Misc. helpers
-;; —————————————————————————————————————————————————————————————————————————————
+;; ——————————————————————————————————————————————————————————————————————————————
+;; Main
+;; ——————————————————————————————————————————————————————————————————————————————
 
-;; Just car's the value of alist-ref (if it exists)
-(define (alist-car-ref key alist)
-  (let ([value (alist-ref key alist)])
-	(if value
-		(car value)
-		#f)))
+;; Connect to the given IRC server, returning an IRC connection object.
+(define (irc:connect host port username nick #!optional (password #f) (realname #f))
+  (let ([conn (make-hash-table)])
+	(define-values (out in)
+	  (ssl-connect* hostname: host port: port))
+	(hash-table-set! conn 'in in)
+	(hash-table-set! conn 'out out)
+	(hash-table-set! conn 'username username)
+	(hash-table-set! conn 'nick nick)
+	(hash-table-set! conn 'realname realname)
+	(hash-table-set! conn 'channels (make-hash-table))
+	(hash-table-set! conn 'users (make-hash-table))
+	(hash-table-set! conn 'capabilities '())
+
+	(irc:write-cmd conn "CAP" "REQ" "userhost-in-names")
+	(if password
+		(irc:write-cmd conn "PASS" password))
+	(irc:write-cmd conn "USER" username "*" "0"
+				   (if realname realname "Jane Row"))
+	(irc:write-cmd conn "NICK" nick)
+	conn))
 
 
-;; By Göran Weinholt, from the Scheme Cookbook
-;; https://cookbook.scheme.org/format-unix-timestamp/
-(define (time-unix->time-utc seconds)
-  (add-duration (date->time-utc (make-date 0 0 0 0 1 1 1970 0))
-                (make-time time-duration 0 seconds)))
+;; Basic loop for using an IRC connection, using two hook functions:
+;;    (on-command connection command params sender)
+;;    (on-reply connection reply-code params sender)
+(define (irc:loop connection on-command on-reply)
+  (let* ([output (irc:read-alist connection)]
+		 [command (alist-ref 'command output)]
+		 [reply (alist-ref 'reply output)]
+		 [params (alist-ref 'params output)]
+		 [sender (alist-ref 'sender output)])
+	(if (and on-command (car command))
+		(apply on-command (append (list connection) command (list params) sender)))
+	(if (and on-reply (car reply))
+		(apply on-reply (append (list connection) reply (list params) sender)))
+	(irc:loop connection on-command on-reply)))
 
 
-;; By Göran Weinholt, from the Scheme Cookbook
-;; https://cookbook.scheme.org/format-unix-timestamp/
-(define (time-unix->string seconds . maybe-format)
-  (apply date->string (time-utc->date (time-unix->time-utc seconds))
-         maybe-format))
-
-
-;; —————————————————————————————————————————————————————————————————————————————
-;; IRC constants
-;; —————————————————————————————————————————————————————————————————————————————
-
-(define RPL_WELCOME 1)
-(define RPL_WHOISUSER 311)
-(define RPL_ENDOFWHO 315)
-(define RPL_ENDOFWHOIS 318)
-(define RPL_LIST 322)
-(define RPL_LISTEND 323)
-(define RPL_TOPIC 332)
-(define RPL_TOPICWHOTIME 333)
-(define RPL_WHOREPLY 352)
-(define RPL_NAMREPLY 353)
-(define RPL_MOTD 372)
-(define RPL_MOTDSTART 375)
-(define RPL_ENDOFMOTD 376)
-(define ERR_NONICKNAMEGIVEN 431)
-(define ERR_ERRONEUSNICKNAME 432)
-(define ERR_NICKNAMEINUSE 433)
+) ;; ircc module
