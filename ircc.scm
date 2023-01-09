@@ -58,14 +58,6 @@
 ;; Misc. helpers
 ;; —————————————————————————————————————————————————————————————————————————————
 
-;; Just car's the value of alist-ref (if it exists)
-(define (alist-car-ref key alist)
-  (let ([value (alist-ref key alist)])
-	(if value
-		(car value)
-		#f)))
-
-
 ;; By Göran Weinholt, from the Scheme Cookbook
 ;; https://cookbook.scheme.org/format-unix-timestamp/
 (define (time-unix->time-utc seconds)
@@ -125,9 +117,9 @@
 ;; received messages, but ircc has to sneakily process some responses itself,
 ;; to ensure basic functionality (i.e., pings, chanlist, userlist, etc.)
 (define (irc:process-alist-internally conn alist)
-  (let ([command (alist-car-ref 'command alist)]
-		[reply (alist-car-ref 'reply alist)]
-		[sender (alist-car-ref 'sender alist)]
+  (let ([command (alist-ref 'command alist)]
+		[reply (alist-ref 'reply alist)]
+		[sender (alist-ref 'sender alist)]
 		[params (alist-ref 'params alist)])
 	(if command
 		(irc:process-command-internally conn command params sender)
@@ -225,7 +217,7 @@
 ;; Return a pice of stored data relating to a user, by nick
 (define (irc:user-get conn nick key)
   (irc:user-add! conn nick)
-  (alist-car-ref key (irc:user-alist conn nick)))
+  (alist-ref key (irc:user-alist conn nick)))
 
 
 ;; Return an alist of data stored relating to the given user
@@ -320,10 +312,10 @@
 		 [command (car verb)]
 		 [reply (string->number (car verb))]
 		 [params (irc:line-verb-params verb)])
-	`((command ,(if (not reply) command #f))
-	  (reply ,reply)
+	`((command . ,(if (not reply) command #f))
+	  (reply . ,reply)
 	  ,(append '(params) params)
-	  (sender ,sender)
+	  (sender . ,sender)
 	  ,(append '(tags) tags))))
 
 
@@ -474,10 +466,10 @@
 		 [reply (alist-ref 'reply output)]
 		 [params (alist-ref 'params output)]
 		 [sender (alist-ref 'sender output)])
-	(if (and on-command (car command))
-		(apply on-command (append (list connection) command (list params) sender)))
-	(if (and on-reply (car reply))
-		(apply on-reply (append (list connection) reply (list params) sender)))
+	(if (and on-command command)
+		(apply on-command (list connection command params sender)))
+	(if (and on-reply reply)
+		(apply on-reply (list connection reply params sender)))
 	(irc:loop connection on-command on-reply)))
 
 
