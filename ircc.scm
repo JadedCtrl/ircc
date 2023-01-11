@@ -27,7 +27,8 @@
 ;;	 irc:user-is-self?)
 
 (import scheme
-		(chicken base) (chicken io) (chicken module) (chicken string) (chicken tcp)
+		(chicken base) (chicken condition) (chicken io) (chicken module)
+		(chicken string) (chicken tcp)
 		srfi-1 srfi-19 srfi-69 srfi-130
 		openssl)
 
@@ -145,9 +146,9 @@
 		[(eq? reply RPL_NAMREPLY)
 		 (let ([channel (third params)]
 			   [chan-symbol (second params)]
-			   [users (cdddr params)])
+			   [users (string-split (cadddr params) " ")])
 		   (irc:channel-set! conn channel 'symbol chan-symbol)
-		   (apply
+		   (map
 			(lambda (user)
 			  (irc:channel-user-add! conn channel (irc:hostmask-nick user))
 			  (irc:user-add! conn (irc:hostmask-nick user))
@@ -416,7 +417,11 @@
 
 ;; Read a single line from the IRC server
 (define (irc:read-line conn)
-  (read-line (hash-table-ref conn 'out)))
+  (handle-exceptions exn
+	  (if (member '(timeout) (condition->list exn))
+		  (irc:read-line conn)
+		  (abort exn))
+	(read-line (hash-table-ref conn 'out))))
 
 
 ;; Send a specific command to the server.
@@ -458,18 +463,19 @@
 
 
 ;; Basic loop for using an IRC connection, using two hook functions:
-;;    (on-command connection command params sender)
-;;    (on-reply connection reply-code params sender)
+;;    (on-command connection command params sender tags)
+;;    (on-reply connection reply-code params sender tags)
 (define (irc:loop connection on-command on-reply)
   (let* ([output (irc:read-alist connection)]
 		 [command (alist-ref 'command output)]
 		 [reply (alist-ref 'reply output)]
 		 [params (alist-ref 'params output)]
-		 [sender (alist-ref 'sender output)])
+		 [sender (alist-ref 'sender output)]
+		 [tags (alist-ref 'tags output)])
 	(if (and on-command command)
-		(apply on-command (list connection command params sender)))
+		(apply on-command (list connection command params sender tags)))
 	(if (and on-reply reply)
-		(apply on-reply (list connection reply params sender)))
+		(apply on-reply (list connection reply params sender tags)))
 	(irc:loop connection on-command on-reply)))
 
 
