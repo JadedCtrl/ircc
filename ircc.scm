@@ -23,7 +23,7 @@
 ;;	 irc:write-cmd irc:write-line
 ;;	 irc:user-set! irc:user-get
 ;;	 irc:channels irc:channel-set! irc:channel-get
-;;	 irc:hostmask? irc:hostmask-nick irc:hostmask-ident irc:hostmask-host
+;;	 irc:hostmask? irc:hostmask-nick irc:hostmask-ident irc:hostmask-host irc:hostmask-userhost
 ;;	 irc:user-is-self?)
 
 (import scheme
@@ -47,6 +47,7 @@
 (define RPL_TOPICWHOTIME 333)         (export RPL_TOPICWHOTIME)
 (define RPL_WHOREPLY 352)             (export RPL_WHOREPLY)
 (define RPL_NAMREPLY 353)             (export RPL_NAMREPLY)
+(define RPL_ENDOFNAMES 366)           (export RPL_ENDOFNAMES)
 (define RPL_MOTD 372)                 (export RPL_MOTD)
 (define RPL_MOTDSTART 375)            (export RPL_MOTDSTART)
 (define RPL_ENDOFMOTD 376)            (export RPL_ENDOFMOTD)
@@ -74,7 +75,7 @@
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
-;; Mucking around with hostmasks
+;; Mucking around with hostmasks, no-context string checks
 ;; —————————————————————————————————————————————————————————————————————————————
 
 ;; Return the nick part of a hostmask
@@ -93,6 +94,12 @@
   (cadr (string-split hostmask "@")))
 
 
+;; The user@host part of a hostmask
+(define (irc:hostmask-userhost hostmask)
+  (string-append
+   (irc:hostmask-ident hostmask) "@" (irc:hostmask-host hostmask)))
+
+
 ;; Return whether or not a string is likely a valid hostmask
 (define (irc:hostmask? string)
   (let ([at-! (string-contains string "!")]
@@ -108,6 +115,13 @@
 (define (irc:user-is-self? conn user-string)
   (string=? (irc:hostmask-nick user-string)
 			(hash-table-ref conn 'nick)))
+
+
+;; Return whether or not a string is likely a channel
+(define (irc:channel? string)
+  (let ([first-char (if (string-null? string) "" (string-take string 1))])
+	(or (string=? first-char "#")
+		(string=? first-char "&"))))
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
@@ -166,6 +180,9 @@
 
 ;; Handle some commands necessary for basic functionality
 (define (irc:process-command-internally conn command params #!optional sender)
+  (if (and (string? sender) (irc:hostmask? sender))
+	  (irc:user-set! conn (irc:hostmask-nick sender) 'hostmask sender))
+
   (cond [(string=? command "PING")
 		 (irc:write-cmd conn "PONG" (last params))]
 		[(and (string=? command "CAP")
@@ -177,10 +194,9 @@
 			   [new-user sender])
 		   (if (irc:user-is-self? conn new-user)
 			   (irc:channel-add! conn room-name))
-		   (if (irc:hostmask? new-user)
-			   (irc:user-set! conn (irc:hostmask-nick new-user)
-							  'hostmask new-user))
-		   (irc:channel-user-add! conn room-name (irc:hostmask-nick new-user)))]))
+		   (irc:channel-user-add! conn room-name (irc:hostmask-nick new-user)))]
+		[(string=? command "NICK")
+		 (irc:user-update-nick! conn sender (last params))]))
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
@@ -205,29 +221,32 @@
   (hash-table-delete! (hash-table-ref conn 'users) nick))
 
 
-;; Associate a piece of data with a user, by nick
-(define (irc:user-set! conn nick key value)
+;; Replace a user's stored alist of data with a new one
+(define (irc:user-set-alist! conn nick alist)
   (let ([users-table (hash-table-ref conn 'users)])
 	(irc:user-add! conn nick)
-	(hash-table-set!
-	 users-table nick
-	 (alist-update key value
-				   (irc:user-alist conn nick)))))
-
-
-;; Return a pice of stored data relating to a user, by nick
-(define (irc:user-get conn nick key)
-  (irc:user-add! conn nick)
-  (alist-ref key (irc:user-alist conn nick)))
+	(hash-table-set! users-table nick alist)))
 
 
 ;; Return an alist of data stored relating to the given user
 (define (irc:user-alist conn nick)
-  (let ([users-hash (hash-table-ref conn 'users)])
+  (let ([users-table (hash-table-ref conn 'users)])
 	(irc:user-add! conn nick)
-	(if (hash-table-exists? users-hash nick)
-		(hash-table-ref users-hash nick)
+	(if (hash-table-exists? users-table nick)
+		(hash-table-ref users-table nick)
 		#f)))
+
+
+;; Associate a piece of data with a user, by nick
+(define (irc:user-set! conn nick key value)
+  (irc:user-set-alist!
+   conn nick (alist-update key value (irc:user-alist conn nick))))
+
+
+;; Return a piece of stored data relating to a user, by nick
+(define (irc:user-get conn nick key)
+  (irc:user-add! conn nick)
+  (alist-ref key (irc:user-alist conn nick)))
 
 
 ;; Add a channel of name `chan` to the internal list of channels
@@ -269,19 +288,43 @@
 
 ;; Add a user to a channel's list of users, by nick
 (define (irc:channel-user-add! conn chan nick)
-  (irc:channel-set!
-   conn chan 'users
-   (append (irc:channel-get conn chan 'users)
-		   (list nick))))
+  (if (not (member nick (irc:channel-users conn chan)))
+	  (irc:channel-set!
+	   conn chan 'users
+	   (append (irc:channel-get conn chan 'users)
+			   (list nick)))))
 
 
 ;; Remove a user from a channel's list of users, by nick
-(define (irc:channel-user-del! conn chan nick)
+(define (irc:channel-user-delete! conn chan nick)
   (irc:channel-set!
    conn chan 'users
    (filter (lambda (a-nick)
 			 (not (string=? nick a-nick)))
 		   (irc:channel-users conn chan))))
+
+
+;; Change a user's stored nick; in internal user-table, and channels' user lists.
+(define (irc:user-update-nick! conn old-hostmask new-nick)
+  (let ([old-nick (irc:hostmask-nick old-hostmask)]
+		[new-hostmask (string-append new-nick "!"
+									 (cadr (string-split old-hostmask "!")))])
+	(if (irc:user-is-self? conn old-hostmask)
+		(hash-table-set! conn 'nick new-nick))
+
+	;; Internal list of users…
+	(irc:user-add! conn new-nick)
+	(irc:user-set-alist!
+	 conn new-nick
+	 (alist-update 'hostmask new-hostmask
+				   (irc:user-alist conn old-nick)))
+	(irc:user-delete! conn old-nick)
+
+	;; For all rooms…
+	(map (lambda (chan)
+		   (irc:channel-user-delete! conn chan old-nick)
+		   (irc:channel-user-add! conn chan new-nick))
+		 (irc:channels conn))))
 
 
 ;; —————————————————————————————————————————————————————————————————————————————
@@ -446,7 +489,6 @@
 	  (ssl-connect* hostname: host port: port))
 	(hash-table-set! conn 'in in)
 	(hash-table-set! conn 'out out)
-	(hash-table-set! conn 'username username)
 	(hash-table-set! conn 'nick nick)
 	(hash-table-set! conn 'realname realname)
 	(hash-table-set! conn 'channels (make-hash-table))
