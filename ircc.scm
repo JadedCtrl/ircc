@@ -147,16 +147,19 @@
   (cond [(eq? reply RPL_WELCOME)
 		 (hash-table-set! conn 'registered #t)
 		 (hash-table-set! conn 'nick (car params))]
+
 		[(eq? reply RPL_TOPIC)
 		 (let ([channel (second params)]
 			   [topic (last params)])
 		   (irc:channel-set! conn channel 'topic topic))]
+
 		[(eq? reply RPL_TOPICWHOTIME)
 		 (let ([channel (second params)]
 			   [setter-nick (third params)]
 			   [time (time-unix->time-utc (string->number (last params)))])
 		   (irc:channel-set! conn channel 'topic-set
 							 (time->date time)))]
+
 		[(eq? reply RPL_NAMREPLY)
 		 (let ([channel (third params)]
 			   [chan-symbol (second params)]
@@ -170,6 +173,8 @@
 				  (irc:user-set! conn (irc:hostmask-nick user) 'hostmask user)
 				  (irc:write-cmd conn "WHO" channel)))
 			users))]
+
+
 		[(eq? reply RPL_WHOREPLY)
 		 (let ([nick (sixth params)]
 			   [ident (third params)]
@@ -185,18 +190,42 @@
 
   (cond [(string=? command "PING")
 		 (irc:write-cmd conn "PONG" (last params))]
+
 		[(and (string=? command "CAP")
 			  (string=? (second params) "ACK"))
 		 (hash-table-set! conn 'capabilities (map string->symbol (cddr params)))
 		 (irc:write-cmd conn "CAP" "END")]
+
 		[(string=? command "JOIN")
  		 (let ([room-name (car params)]
 			   [new-user sender])
 		   (if (irc:user-is-self? conn new-user)
 			   (irc:channel-add! conn room-name))
 		   (irc:channel-user-add! conn room-name (irc:hostmask-nick new-user)))]
+
 		[(string=? command "NICK")
-		 (irc:user-update-nick! conn sender (last params))]))
+		 (irc:user-update-nick! conn sender (last params))]
+
+		;; We wanna create a private-message "channel", if it's a PM
+		[(and (string=? command "PRIVMSG")
+			  (string? (car params))
+			  (not (irc:channel? (car params))))
+		 (let* ([user-a (if (irc:hostmask? sender)
+							(irc:hostmask-nick sender)
+							#f)]
+				[user-b (car params)]
+				[users (list user-a user-b)]
+				[channel
+				 (if (and user-a user-b)
+					 (filter (lambda (user) (not (irc:user-is-self? conn user)))
+							 users)
+					 #f)])
+		   (if (and user-a user-b channel)
+			   (begin
+				 (irc:channel-add! conn channel)
+				 (map (lambda (user)
+						(irc:channel-user-add! conn channel user))
+					  users))))]))
 
 
 ;; ——————————————————————————————————————————————————————————————————————————————
@@ -251,8 +280,11 @@
 
 ;; Add a channel of name `chan` to the internal list of channels
 (define (irc:channel-add! conn chan)
-  (hash-table-set! (hash-table-ref conn 'channels) chan (make-hash-table))
-  (hash-table-set! (irc:channel-table conn chan) 'users '()))
+  (let ([channels-table (hash-table-ref conn 'channels)])
+	(unless (hash-table-exists? channels-table chan)
+	  (begin
+		(hash-table-set! (hash-table-ref conn 'channels) chan (make-hash-table))
+		(hash-table-set! (irc:channel-table conn chan) 'users '())))))
 
 
 ;; Remove a channel of name `chan` from the internal list of channels
@@ -288,11 +320,11 @@
 
 ;; Add a user to a channel's list of users, by nick
 (define (irc:channel-user-add! conn chan nick)
-  (if (not (member nick (irc:channel-users conn chan)))
-	  (irc:channel-set!
-	   conn chan 'users
-	   (append (irc:channel-get conn chan 'users)
-			   (list nick)))))
+  (unless (member nick (irc:channel-users conn chan))
+	(irc:channel-set!
+	 conn chan 'users
+	 (append (irc:channel-get conn chan 'users)
+			 (list nick)))))
 
 
 ;; Remove a user from a channel's list of users, by nick
