@@ -110,6 +110,17 @@
 		 (string-cursor<? at-@ at-.))))
 
 
+;; Remove all usermode prefixes from a user string (hostmask, nick, etc)
+(define (irc:trim-usermode-prefixes user-string)
+  (string-trim user-string
+			   (lambda (char)
+				 (or (eq? char #\~)
+					 (eq? char #\&)
+					 (eq? char #\@)
+					 (eq? char #\%)
+					 (eq? char #\+)))))
+
+
 ;; Return whether or not the given string (username/nick/hostmask/etc) is
 ;; equivalent to current user.
 (define (irc:user-is-self? conn user-string)
@@ -163,7 +174,8 @@
 		[(eq? reply RPL_NAMREPLY)
 		 (let ([channel (third params)]
 			   [chan-symbol (second params)]
-			   [users (string-split (cadddr params) " ")])
+			   [users (map irc:trim-usermode-prefixes
+						   (string-split (cadddr params) " "))])
 		   (irc:channel-set! conn channel 'symbol chan-symbol)
 		   (map
 			(lambda (user)
