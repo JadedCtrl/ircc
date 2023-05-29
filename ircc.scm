@@ -28,7 +28,7 @@
 
 (import scheme
 		(chicken base) (chicken condition) (chicken io) (chicken module)
-		(chicken string) (chicken tcp)
+		(chicken pretty-print) (chicken string) (chicken tcp)
 		srfi-1 srfi-19 srfi-69 srfi-130
 		openssl)
 
@@ -551,18 +551,20 @@
 ;; Basic loop for using an IRC connection, using two hook functions:
 ;;    (on-command connection command params sender tags)
 ;;    (on-reply connection reply-code params sender tags)
-(define (irc:loop connection on-command on-reply)
+(define (irc:loop connection on-command on-reply #!optional (debug #f))
   (let* ([output (irc:read-alist connection)]
 		 [command (alist-ref 'command output)]
 		 [reply (alist-ref 'reply output)]
 		 [params (alist-ref 'params output)]
 		 [sender (alist-ref 'sender output)]
 		 [tags (alist-ref 'tags output)])
+    (if debug
+        (pretty-print output))
 	(if (and on-command command)
 		(apply on-command (list connection command params sender tags)))
 	(if (and on-reply reply)
 		(apply on-reply (list connection reply params sender tags)))
-	(irc:loop connection on-command on-reply)))
+	(irc:loop connection on-command on-reply debug)))
 
 
 ) ;; ircc module
