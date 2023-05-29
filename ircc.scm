@@ -167,9 +167,11 @@
 		[(eq? reply RPL_TOPICWHOTIME)
 		 (let ([channel (second params)]
 			   [setter-nick (third params)]
-			   [time (time-unix->time-utc (string->number (last params)))])
-		   (irc:channel-set! conn channel 'topic-set
-							 (time->date time)))]
+			   [time (if (string? (last params))
+                         (time-unix->time-utc
+                          (string->number (last params))))])
+           (if (time? time)
+               (irc:channel-set! conn channel 'topic-set (time->date time))))]
 
 		[(eq? reply RPL_NAMREPLY)
 		 (let ([channel (third params)]
@@ -398,7 +400,7 @@
 		 [sender (irc:line-sender str space-split)]
 		 [verb (irc:line-verb str space-split)]
 		 [command (car verb)]
-		 [reply (string->number (car verb))]
+		 [reply (and (car verb) (string->number (car verb)))]
 		 [params (irc:line-verb-params verb)])
 	`((command . ,(if (not reply) command #f))
 	  (reply . ,reply)
